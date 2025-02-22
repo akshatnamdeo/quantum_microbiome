@@ -1,0 +1,20 @@
+# Ignore specific folders in the base directory
+/checkpoints/
+/data/raw/
+/wandb/
+/include/
+/env/
+
+# Ignore common system files
+.DS_Store
+Thumbs.db
+
+# Ignore Python-specific files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environments
+venv/
+.env/

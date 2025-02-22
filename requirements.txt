@@ -1,0 +1,11 @@
+numpy
+pandas
+scikit-learn
+torch
+networkx
+matplotlib
+seaborn
+pytest
+black
+flake8
+python-dotenv
