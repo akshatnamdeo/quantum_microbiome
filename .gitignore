@@ -1,6 +1,9 @@
 # Ignore specific folders in the base directory
-/checkpoints/
+/src/checkpoints/
 /data/raw/
+/data/processed/
+/data/cleaned/
+/data/unified/
 /wandb/
 /include/
 /env/
