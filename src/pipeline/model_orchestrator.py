@@ -67,6 +67,7 @@ def predict_metabolite(metabolite_features, models=None):
         - "transport_state_input": Input vector for the Transport State Model (e.g., dimension 21)
         - "brain_effect_input": Input vector for the Brain Region Effect Model (e.g., dimension 19)
         - "concentration": A scalar representing the metabolite's amount
+        - "name": The name of the metabolite
     Returns a dictionary of predictions from each model.
     """
     if models is None:
@@ -85,6 +86,7 @@ def predict_metabolite(metabolite_features, models=None):
 
     # Package predictions into a dictionary.
     prediction = {
+        "name": metabolite_features.get("name", "Unknown_Metabolite"),  # Preserve the name
         "bbb_prediction": {
             "crossing_probability": bbb_pred[0].tolist(),
             "transport_rate": bbb_pred[1].tolist(),

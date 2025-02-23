@@ -17,10 +17,7 @@ def format_output(aggregated_predictions):
         - "region_concentration"
         - "accumulation_rates"
         - "interference_patterns"
-    Each is a list of 13 values corresponding to the following brain regions:
-        amygdala, basal ganglia, cerebellum, cerebral cortex, choroid plexus,
-        hippocampal formation, hypothalamus, medulla oblongata, midbrain, pons,
-        spinal cord, thalamus, white matter.
+    Each is expected to be a dictionary where keys are metabolite names and values are lists of 13 numbers.
     
     Returns a tuple (json_output, text_summary):
         - json_output: a JSON-formatted string of the aggregated results.
@@ -33,19 +30,31 @@ def format_output(aggregated_predictions):
     ]
     
     formatted = {}
-    for key, values in aggregated_predictions.items():
-        # Flatten if the list is nested
-        flat_values = flatten_if_nested(values)
-        formatted[key] = {region: round(val, 3) for region, val in zip(regions, flat_values)}
+    for key, metabolites in aggregated_predictions.items():
+        formatted[key] = {}
+        for metabolite, values in metabolites.items():
+            flat_values = flatten_if_nested(values)
+
+            # Ensure numeric conversion and handle exceptions
+            try:
+                numeric_values = [round(float(val), 3) for val in flat_values]  # Convert each value to float and round
+            except ValueError as e:
+                print(f"❌ Skipping {metabolite} in {key} due to non-numeric values: {e}")
+                continue
+
+            formatted[key][metabolite] = {region: num_val for region, num_val in zip(regions, numeric_values)}
     
     json_output = json.dumps(formatted, indent=4)
     
     # Create a text summary
     summary_lines = []
-    for key, region_values in formatted.items():
+    for key, metabolites in formatted.items():
         summary_lines.append(f"{key.replace('_', ' ').capitalize()}:")
-        for region, value in region_values.items():
-            summary_lines.append(f"    {region}: {value}")
+        for metabolite, region_values in metabolites.items():
+            summary_lines.append(f"  {metabolite}:")
+            for region, value in region_values.items():
+                summary_lines.append(f"    {region}: {value}")
+    
     text_summary = "\n".join(summary_lines)
     
     return json_output, text_summary

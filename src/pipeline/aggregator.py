@@ -2,44 +2,41 @@ import numpy as np
 
 def aggregate_predictions(predictions):
     """
-    Aggregate the brain effect predictions from multiple metabolites.
-    The predictions list should contain dictionaries (from model_orchestrator.py)
-    with a key "brain_effect_prediction" and a "concentration" value.
-    
-    Aggregation strategy:
-        - Multiply each metabolite's brain effect outputs by its concentration.
-        - Sum these weighted outputs.
-        - Normalize by the total concentration.
-    
-    Returns an aggregated dictionary with keys:
-        - "region_concentration"
-        - "accumulation_rates"
-        - "interference_patterns"
+    Aggregates brain effect predictions across all metabolites.
+    - Sums the weighted outputs across all metabolites.
+    - Normalizes by the total concentration.
+    - Stores each metabolite's values in a dictionary.
+
+    Returns:
+        A dictionary with:
+            - "region_concentration": {Metabolite_Name: [values]}
+            - "accumulation_rates": {Metabolite_Name: [values]}
+            - "interference_patterns": {Metabolite_Name: [values]}
     """
     aggregated = {
-        "region_concentration": None,
-        "accumulation_rates": None,
-        "interference_patterns": None
+        "region_concentration": {},
+        "accumulation_rates": {},
+        "interference_patterns": {}
     }
     total_concentration = 0.0
 
     for pred in predictions:
+        # Use the actual metabolite name from the prediction, with a more descriptive fallback
+        metabolite_name = pred.get("name", "Unknown_Metabolite")
         conc = pred.get("concentration", 1.0)
         total_concentration += conc
-        be_pred = pred.get("brain_effect_prediction", {})
-        for key in aggregated.keys():
-            value = np.array(be_pred.get(key))
-            if aggregated[key] is None:
-                aggregated[key] = conc * value
-            else:
-                aggregated[key] += conc * value
 
-    # Normalize aggregated values by total concentration
-    for key in aggregated:
-        if total_concentration > 0:
-            aggregated[key] = (aggregated[key] / total_concentration).tolist()
-        else:
-            aggregated[key] = aggregated[key].tolist()
+        be_pred = pred.get("brain_effect_prediction", {})
+
+        # Convert lists to NumPy arrays and flatten to 1D
+        region_values = np.array(be_pred.get("region_concentration", [[0.0] * 13])).flatten()
+        acc_values = np.array(be_pred.get("accumulation_rates", [[0.0] * 13])).flatten()
+        int_values = np.array(be_pred.get("interference_patterns", [[0.0] * 13])).flatten()
+
+        # Store results per metabolite instead of lists
+        aggregated["region_concentration"][metabolite_name] = region_values.tolist()
+        aggregated["accumulation_rates"][metabolite_name] = acc_values.tolist()
+        aggregated["interference_patterns"][metabolite_name] = int_values.tolist()
 
     return aggregated
 
