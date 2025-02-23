@@ -1,17 +1,20 @@
 import os
+import sys
 import json
 import numpy as np
 import pandas as pd
-import sys
+from flask import Flask, request, Response, stream_with_context, jsonify
 
-# Get the absolute path to your project's root directory
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) # go up one directory.
-
-# Add the project root to sys.path
+# Add project root to sys.path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(project_root)
 
-from src.pipeline import model_orchestrator, aggregator, output_formatter
+# Import pipeline modules
+from src.pipeline import model_orchestrator, aggregator, output_formatter, llm_integration
 
+# ---------------------------
+# Helper functions for processing records
+# ---------------------------
 def parse_cellloc(cellloc_str):
     try:
         locs = json.loads(cellloc_str.replace("'", "\""))
@@ -32,7 +35,6 @@ def parse_json_expression(expr_str):
         expr_dict = json.loads(expr_str.replace("'", "\""))
     except Exception as e:
         expr_dict = {}
-    # Fixed order for brain regions
     BRAIN_REGIONS = [
         "amygdala", "basal ganglia", "cerebellum", "cerebral cortex", "choroid plexus",
         "hippocampal formation", "hypothalamus", "medulla oblongata", "midbrain", "pons",
@@ -41,7 +43,6 @@ def parse_json_expression(expr_str):
     return [expr_dict.get(region, 0.0) for region in BRAIN_REGIONS]
 
 def one_hot_transport_direction(value):
-    # Fixed order: ["in", "out", "in | out", "unknown"]
     mapping = {
         "in": [1, 0, 0, 0],
         "out": [0, 1, 0, 0],
@@ -52,7 +53,6 @@ def one_hot_transport_direction(value):
     return mapping.get(v, mapping["unknown"])
 
 def one_hot_direction(val):
-    # For the Direction column; possible values: "in", "out", "degrading", "producing", "degrading | producing"
     mapping = {
         "in": [1, 0, 0, 0, 0],
         "out": [0, 1, 0, 0, 0],
@@ -66,60 +66,35 @@ def one_hot_direction(val):
 def process_record_to_inputs(record):
     """
     Convert a metabolite record (Pandas Series) into the input vectors expected by the models.
-    Assumes the record contains columns:
-        - "Transport_direction"
-        - "CellLoc"
-        - "Direction"
-        - "is_neurotransmitter"
-        - "is_hormone"
-        - "brain_tissues"
-        - "aggregated_brain_expression"
-    For simplicity, some encodings are simulated with fixed dummy vectors.
+    Assumes the record contains:
+      - "Transport_direction", "CellLoc", "Direction",
+      - "is_neurotransmitter", "is_hormone",
+      - "brain_tissues", "aggregated_brain_expression"
+    Some encodings use fixed dummy vectors where needed.
     """
-    # --- BBB Transport Model input (34 dims) ---
-    # one-hot encoding for Transport_direction (4 dims)
+    # BBB Transport Model input (34 dims)
     transport_dir = one_hot_transport_direction(record["Transport_direction"])
-    
-    # For CellLoc, we parse the value and create a dummy multi-hot encoding.
-    # For example, if "Mitochondria" is present, we encode as [1, 0, 0, 0, 0]; otherwise zeros.
     cellloc_list = parse_cellloc(record["CellLoc"])
-    cellloc_encoding = [1, 0, 0, 0, 0] if "Mitochondria" in cellloc_list else [0, 0, 0, 0, 0]
-    
-    # Additional dummy vector for CellLoc (5 dims)
+    cellloc_encoding = [1, 0, 0, 0, 0] if "mitochondria" in [l.lower() for l in cellloc_list] else [0, 0, 0, 0, 0]
     additional_cellloc = [0, 0, 0, 0, 0]
-    
-    # Binary flags for is_neurotransmitter and is_hormone (2 dims)
     binary_flags = [
         1 if record["is_neurotransmitter"].strip().lower() == "yes" else 0,
         1 if record["is_hormone"].strip().lower() == "yes" else 0
     ]
-    
-    # Dummy encoding for brain_tissues (simulate with a fixed vector of length 5)
     brain_tissues_dummy = [1, 1, 1, 1, 1]
-    
-    # Parse aggregated_brain_expression into a 13-dimensional vector.
     expr_vector = parse_json_expression(record["aggregated_brain_expression"])
-    
-    # Concatenate for BBB input: 4 + 5 + 5 + 2 + 5 + 13 = 34 dims.
     bbb_input = transport_dir + cellloc_encoding + additional_cellloc + binary_flags + brain_tissues_dummy + expr_vector
-    
-    # --- Transport State Model input (21 dims) ---
-    # It is constructed as: one-hot for Transport_direction (4 dims) +
-    # dummy CellLoc encoding (5 dims) + one-hot for Direction (5 dims) + dummy current state (3 dims)
-    # Total so far: 4+5+5+3 = 17; pad with 4 zeros to reach 21.
-    ts_transport = transport_dir  # 4 dims
-    ts_cellloc = cellloc_encoding   # 5 dims (reuse)
-    ts_direction = one_hot_direction(record["Direction"])  # 5 dims
-    current_state = [0.33, 0.33, 0.34]  # dummy distribution (3 dims)
+
+    # Transport State Model input (21 dims)
+    ts_transport = transport_dir
+    ts_cellloc = cellloc_encoding
+    ts_direction = one_hot_direction(record["Direction"])
+    current_state = [0.33, 0.33, 0.34]  # Dummy current state
     ts_input = ts_transport + ts_cellloc + ts_direction + current_state
-    # Pad with zeros if needed:
     ts_input += [0.0] * (21 - len(ts_input))
-    
-    # --- Brain Effect Model input (19 dims) ---
-    # It is: aggregated expression (13 dims) + binary flags (2 dims) + dummy current state (3 dims) + dummy BBB probability (1 dim)
-    be_input = expr_vector + binary_flags + current_state + [0.5]
-    # Total: 13+2+3+1 = 19 dims.
-    
+
+    # Brain Effect Model input (19 dims)
+    be_input = expr_vector + binary_flags + current_state + [0.5]  # Dummy BBB probability
     return {
         "bbb_input": bbb_input,
         "transport_state_input": ts_input,
@@ -132,7 +107,7 @@ def load_metabolite_record(metabolite_name, csv_path='data/unified/unified_datas
     """
     df = pd.read_csv(csv_path)
     matches = df[df['name'].str.lower() == metabolite_name.lower()]
-    if len(matches) > 0:
+    if not matches.empty:
         return matches.iloc[0]
     return None
 
@@ -154,37 +129,71 @@ def create_pipeline_inputs(llm_metabolites, csv_path='data/unified/unified_datas
         inputs.append(processed)
     return inputs
 
-def main():
-    # Simulate LLM output with two metabolites: Estrone sulfate and Formaldehyde.
-    llm_output = [
-        {"name": "Estrone sulfate", "amount": 1.0},
-        {"name": "Formaldehyde", "amount": 0.8}
-    ]
-    
-    # Create pipeline inputs by looking up the full record for each metabolite.
-    metabolites = create_pipeline_inputs(llm_output)
-    if not metabolites:
-        print("No valid metabolites found. Exiting.")
-        return
-    
-    # Run the individual models pipeline.
-    predictions = model_orchestrator.run_pipeline(metabolites)
-    print("Individual Pipeline Predictions:")
-    for idx, pred in enumerate(predictions):
-        print(f"Metabolite {idx+1} ({llm_output[idx]['name']}):")
-        print(pred)
-    
-    # Aggregate brain effect predictions from all metabolites.
-    aggregated = aggregator.aggregate_predictions(predictions)
-    print("\nAggregated Brain Effect Predictions:")
-    print(aggregated)
-    
-    # Format final output.
-    json_output, text_summary = output_formatter.format_output(aggregated)
-    print("\nFinal Formatted Output (JSON):")
-    print(json_output)
-    print("\nFinal Formatted Output (Text Summary):")
-    print(text_summary)
+# ---------------------------
+# Flask application with streaming response
+# ---------------------------
+app = Flask(__name__)
 
-if __name__ == '__main__':
-    main()
+@app.route("/process", methods=["POST"])
+def process():
+    """
+    Endpoint that accepts user input in JSON format.
+    Expects a JSON object with key "user_input".
+    The llm_integration module converts this into an llm_output (a list of metabolites).
+    Then the pipeline looks up records, processes inputs, runs predictions,
+    aggregates results, and streams final summary, charts data, and status messages in real time.
+    """
+    data = request.get_json()
+    if not data or "user_input" not in data:
+        return jsonify({"error": "Invalid input. Expected JSON with 'user_input' key."}), 400
+
+    user_input = data["user_input"]
+
+    # Get metabolites list from llm_integration (assumed implemented)
+    try:
+        llm_metabolites = llm_integration.get_llm_output(user_input)
+    except Exception as e:
+        return jsonify({"error": "LLM processing failed.", "details": str(e)}), 500
+
+    if not llm_metabolites:
+        return jsonify({"error": "No metabolites extracted from input."}), 400
+
+    # Create pipeline inputs by looking up records in the unified dataset.
+    pipeline_inputs = create_pipeline_inputs(llm_metabolites)
+    if not pipeline_inputs:
+        return jsonify({"error": "No valid metabolite records found."}), 400
+
+    # Create a generator to stream messages.
+    def generate_stream():
+        # Stream status messages from each metabolite's processing.
+        statuses = []
+        # Run predictions for each metabolite individually.
+        predictions = []
+        for idx, met in enumerate(pipeline_inputs):
+            pred = model_orchestrator.predict_metabolite(met)
+            predictions.append(pred)
+            # Generate a status message for this metabolite.
+            status_msg = llm_integration.generate_status(pred)
+            statuses.append(status_msg)
+            # Yield a JSON message for this metabolite's status.
+            yield json.dumps({"status": status_msg}) + "\n"
+        
+        # Once all metabolites are processed, aggregate the brain effect predictions.
+        aggregated = aggregator.aggregate_predictions(predictions)
+        # Generate chart data (assume this function exists).
+        charts = llm_integration.generate_chart_data(aggregated)
+        # Generate final summary.
+        final_summary = llm_integration.generate_final_summary(aggregated)
+        
+        # Build final response message.
+        final_output = {
+            "summary": final_summary,
+            "charts": charts,
+            "status": statuses
+        }
+        yield json.dumps({"final_output": final_output}) + "\n"
+    
+    return Response(stream_with_context(generate_stream()), mimetype="application/json")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
